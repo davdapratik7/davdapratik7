@@ -17,10 +17,6 @@
 
 📣 Let's connect and embark on a journey of technological exploration! Whether it's discussing the nuances of Dotnet development, sharing insights on project management, or exploring the latest trends in the industry, I'm here to learn, collaborate, and make meaningful contributions.
 
-## Latest Publications
-- [Your Publication Title](#) - Brief description of your publication.
-- [Another Publication Title](#) - Brief description of your publication.
-
 ## Latest Work
 - [Your Latest Work Title](#) - Brief description of your latest work.
 - [Another Work Title](#) - Brief description of your latest work.
@@ -44,4 +40,4 @@
 - [![Gmail](https://img.shields.io/badge/Gmail-%23D14836.svg?&style=for-the-badge&logo=gmail&logoColor=white)](mailto:your.email@example.com)
 
 ## If you like what I do
-[![Buy me a coffee](https://img.shields.io/badge/Buy_Me_A_Coffee-%23FFDD00.svg?&style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://www.buymeacoffee.com/yourusername)
+[![Buy me a coffee](https://img.shields.io/badge/Buy_Me_A_Coffee-%23FFDD00.svg?&style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/davdapratij)
