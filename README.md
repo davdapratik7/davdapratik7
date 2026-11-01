@@ -14,7 +14,7 @@
 
 ### 👨‍💻 Executive Summary
 
-Experienced **Senior .NET Developer** with **6+ years of hands-on expertise** (since 2018) architecting and delivering scalable enterprise backends, high-throughput RESTful Web APIs, and robust data persistence layers. 
+Experienced **Senior .NET Developer** with **8+ years of hands-on expertise** (since 2018) architecting and delivering scalable enterprise backends, high-throughput RESTful Web APIs, and robust data persistence layers. 
 
 - 🏛️ **Architecture & Standards:** Strong advocate of Clean Architecture, Domain-Driven Design (DDD) principles, SOLID design, Repository & Unit of Work patterns, and testable codebases.
 - ⚡ **Core Strengths:** ASP.NET Core, C#, Entity Framework Core, LINQ, MS SQL Server query optimization, authentication/authorization (JWT, ASP.NET Identity), and microservices integration.
