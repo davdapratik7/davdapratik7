@@ -47,10 +47,13 @@ Experienced **Senior .NET Developer** with **8+ years of hands-on expertise** (s
 
 ### 📈 GitHub Metrics
 
-<div align="center">
-  <img src="https://github-readme-stats.vercel.app/api?username=davdapratik7&show_icons=true&theme=tokyonight&hide_border=true&count_private=true" alt="Pratik's GitHub Stats" width="48%" />
-  <img src="https://github-readme-stats.vercel.app/api/top-langs/?username=davdapratik7&layout=compact&theme=tokyonight&hide_border=true" alt="Top Languages" width="48%" />
-</div>
+<p align="center">
+  <img src="https://github-stats-extended.vercel.app/api?username=davdapratik7&show_icons=true&theme=tokyonight&hide_border=true" alt="Pratik's GitHub Stats" />
+  <img src="https://github-stats-extended.vercel.app/api/top-langs/?username=davdapratik7&layout=compact&theme=tokyonight&hide_border=true" alt="Top Languages" />
+</p>
+<p align="center">
+  <img src="https://streak-stats.demolab.com/?user=davdapratik7&theme=tokyonight&hide_border=true" alt="GitHub Streak" />
+</p>
 
 ---
 
