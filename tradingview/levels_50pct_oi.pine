@@ -1,0 +1,198 @@
+//@version=5
+// Levels + 50% Midpoint + OI-confirmed Level-to-Level Plan
+//
+// Framework (no EMA / pivot-points / Fib):
+//   1. Daily swing / S-R levels (manual list + auto daily swings)
+//   2. 50% midpoint between every two levels that are >= minGap points apart
+//   3. Green = extreme bullish level, Red = extreme bearish level,
+//      Black = daily 50%, Blue/Orange = 15m levels (+ inner 15m 50%)
+//   4. Entry = (1) level breakdown/breakout close, (2) opposite-colour candle forms
+//      and its extreme is broken, (3) OI confirmation (manual toggle, see note)
+//   5. Targets = next levels in the direction of the trade (cascade)
+//
+// NOTE: Pine Script cannot read option-chain OI. Tick the OI toggles yourself
+// after checking your OI data (call writers vs put writers).
+indicator("Levels + 50% Midpoint (OI Plan)", shorttitle="L50-OI", overlay=true, max_lines_count=300, max_labels_count=300)
+
+// ---------------- Inputs ----------------
+gL    = "Levels"
+levelsStr = input.string("22185,24985", "Manual levels (comma separated)", group=gL)
+useAuto   = input.bool(true, "Add auto daily swing levels", group=gL)
+swingLen  = input.int(10, "Daily swing length (bars each side)", minval=2, group=gL)
+minGap    = input.float(100.0, "Min gap for 50% line (points)", minval=1, group=gL)
+rangePct  = input.float(6.0, "Show levels within +/- % of price", minval=0.5, group=gL)
+bullLvl   = input.float(0.0, "Extreme bullish level (0 = highest shown)", group=gL)
+bearLvl   = input.float(0.0, "Extreme bearish level (0 = lowest shown)", group=gL)
+
+gT    = "15-minute levels"
+show15    = input.bool(true, "Show 15m levels + inner 50%", group=gT)
+len15     = input.int(5, "15m swing length", minval=2, group=gT)
+
+gO    = "OI confirmation (manual)"
+oiBull    = input.bool(false, "OI bullish: put writers adding / call writers exiting", group=gO)
+oiBear    = input.bool(false, "OI bearish: call writers adding / put writers exiting", group=gO)
+needOI    = input.bool(false, "Only signal when OI toggle agrees", group=gO)
+
+gC    = "Colors"
+cBull = input.color(color.green, "Extreme bullish", group=gC)
+cBear = input.color(color.red, "Extreme bearish", group=gC)
+cMid  = input.color(color.black, "Daily 50%", group=gC)
+cLvl  = input.color(color.gray, "Other daily levels", group=gC)
+c15lo = input.color(color.blue, "15m lower", group=gC)
+c15hi = input.color(color.orange, "15m upper", group=gC)
+
+// ---------------- Level store ----------------
+var array<float> lv  = array.new_float()   // daily levels (manual + auto)
+var array<float> l15 = array.new_float()   // 15m levels
+
+if barstate.isfirst
+    parts = str.split(levelsStr, ",")
+    for p in parts
+        v = str.tonumber(str.trim(p))
+        if not na(v)
+            lv.push(v)
+
+dHi = request.security(syminfo.tickerid, "D",  ta.pivothigh(high, swingLen, swingLen))
+dLo = request.security(syminfo.tickerid, "D",  ta.pivotlow(low,  swingLen, swingLen))
+mHi = request.security(syminfo.tickerid, "15", ta.pivothigh(high, len15, len15))
+mLo = request.security(syminfo.tickerid, "15", ta.pivotlow(low,  len15, len15))
+
+addLevel(array<float> arr, float v) =>
+    if not na(v) and not arr.includes(v)
+        arr.push(v)
+
+if useAuto
+    addLevel(lv, dHi)
+    addLevel(lv, dLo)
+if show15
+    addLevel(l15, mHi)
+    addLevel(l15, mLo)
+
+// nearest level strictly below / above x (na if none)
+nearBelow(array<float> arr, float x) =>
+    float r = na
+    for i = 0 to arr.size() - 1
+        v = arr.get(i)
+        if v < x and (na(r) or v > r)
+            r := v
+    r
+
+nearAbove(array<float> arr, float x) =>
+    float r = na
+    for i = 0 to arr.size() - 1
+        v = arr.get(i)
+        if v > x and (na(r) or v < r)
+            r := v
+    r
+
+// ---------------- Entry state machine ----------------
+var bool  shortArmed = false
+var bool  longArmed  = false
+var float brkShort   = na
+var float brkLong    = na
+var float greenLow   = na   // low of pull-back green candle after breakdown
+var float redHigh    = na   // high of pull-back red candle after breakout
+
+bool shortSig = false
+bool longSig  = false
+float t1 = na
+float t2 = na
+
+if bar_index > 0
+    // detect level cross on this bar
+    for i = 0 to lv.size() - 1
+        L = lv.get(i)
+        if close[1] >= L and close < L
+            shortArmed := true, longArmed := false
+            brkShort := L, greenLow := na
+        if close[1] <= L and close > L
+            longArmed := true, shortArmed := false
+            brkLong := L, redHigh := na
+
+    if shortArmed
+        if close > brkShort
+            shortArmed := false                       // failed breakdown
+        else
+            if not na(greenLow) and close < greenLow
+                shortSig := not needOI or oiBear
+                t1 := nearBelow(lv, brkShort)
+                t2 := na(t1) ? na : nearBelow(lv, t1)
+                shortArmed := false
+            else if close > open
+                greenLow := low
+
+    if longArmed
+        if close < brkLong
+            longArmed := false                        // failed breakout
+        else
+            if not na(redHigh) and close > redHigh
+                longSig := not needOI or oiBull
+                t1 := nearAbove(lv, brkLong)
+                t2 := na(t1) ? na : nearAbove(lv, t1)
+                longArmed := false
+            else if close < open
+                redHigh := high
+
+if shortSig
+    label.new(bar_index, high, "SELL\nT1 " + str.tostring(t1, format.mintick) + "\nT2 " + str.tostring(t2, format.mintick) + (oiBear ? "\nOI ok" : "\nOI ?"),
+         style=label.style_label_down, color=cBear, textcolor=color.white, size=size.small)
+if longSig
+    label.new(bar_index, low, "BUY\nT1 " + str.tostring(t1, format.mintick) + "\nT2 " + str.tostring(t2, format.mintick) + (oiBull ? "\nOI ok" : "\nOI ?"),
+         style=label.style_label_up, color=cBull, textcolor=color.white, size=size.small)
+
+alertcondition(shortSig, "Level SELL setup", "Breakdown + green-candle low broken. Check OI.")
+alertcondition(longSig,  "Level BUY setup",  "Breakout + red-candle high broken. Check OI.")
+
+// ---------------- Drawing (last bar only) ----------------
+var array<line>  lines  = array.new_line()
+var array<label> labels = array.new_label()
+
+drawLvl(float y, color c, string txt, string sty) =>
+    ln = line.new(bar_index - 100, y, bar_index, y, extend=extend.right, color=c, width=2,
+         style = sty == "dash" ? line.style_dashed : line.style_solid)
+    lb = label.new(bar_index + 2, y, txt + " " + str.tostring(y, format.mintick), style=label.style_none, textcolor=c, size=size.small)
+    lines.push(ln)
+    labels.push(lb)
+
+if barstate.islast
+    while lines.size() > 0
+        line.delete(lines.pop())
+    while labels.size() > 0
+        label.delete(labels.pop())
+
+    // visible daily levels, sorted ascending
+    array<float> vis = array.new_float()
+    for i = 0 to lv.size() - 1
+        v = lv.get(i)
+        if math.abs(v - close) / close * 100 <= rangePct
+            vis.push(v)
+    vis.sort(order.ascending)
+    n = vis.size()
+
+    if n > 0
+        hi = bullLvl > 0 ? bullLvl : vis.get(n - 1)
+        lo = bearLvl > 0 ? bearLvl : vis.get(0)
+        for i = 0 to n - 1
+            v = vis.get(i)
+            if v == hi
+                drawLvl(v, cBull, "BULL", "solid")
+            else if v == lo
+                drawLvl(v, cBear, "BEAR", "solid")
+            else
+                drawLvl(v, cLvl, "LVL", "solid")
+        for i = 0 to n - 2
+            a = vis.get(i)
+            b = vis.get(i + 1)
+            if b - a >= minGap
+                drawLvl((a + b) / 2, cMid, "50%", "dash")
+
+    // 15m levels bracketing current price + inner 50%
+    if show15 and l15.size() > 0
+        dn = nearBelow(l15, close)
+        up = nearAbove(l15, close)
+        if not na(dn)
+            drawLvl(dn, c15lo, "15m", "solid")
+        if not na(up)
+            drawLvl(up, c15hi, "15m", "solid")
+        if not na(dn) and not na(up)
+            drawLvl((dn + up) / 2, color.purple, "15m 50%", "dash")
