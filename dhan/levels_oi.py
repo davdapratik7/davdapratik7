@@ -162,6 +162,16 @@ def oi_bias(oc, spot, strikes_each_side=5):
     return bias, ce, pe
 
 
+def oi_walls(oc, spot):
+    """Call wall = strike above spot with the most CE OI (resistance);
+    put wall = strike below spot with the most PE OI (support)."""
+    up = [(float(k), v.get("ce", {}).get("oi", 0)) for k, v in oc.items() if float(k) > spot]
+    dn = [(float(k), v.get("pe", {}).get("oi", 0)) for k, v in oc.items() if float(k) < spot]
+    cw = max(up, key=lambda x: x[1]) if up else None
+    pw = max(dn, key=lambda x: x[1]) if dn else None
+    return cw, pw
+
+
 # ---------------- Dhan API ----------------
 def _post(path, body):
     import requests
@@ -170,7 +180,8 @@ def _post(path, body):
         sys.exit("Set DHAN_CLIENT_ID and DHAN_ACCESS_TOKEN")
     r = requests.post(BASE + path, json=body, timeout=20,
                       headers={"access-token": tok, "client-id": cid, "Content-Type": "application/json"})
-    r.raise_for_status()
+    if not r.ok:
+        sys.exit(f"Dhan API {path} -> HTTP {r.status_code}: {r.text[:300]}")
     return r.json()
 
 
@@ -237,6 +248,13 @@ def run(a):
     print(f"  Dynamic 50% : {dm[0]:.2f}  (between {dm[1]:.2f} and {dm[2]:.2f})" if dm else "  Dynamic 50% : n/a")
     print(f"  Pain zone   : {'ACTIVE' if pain_zone(prices, spot) else '-'}")
     print(f"  OI bias     : {bias}  (CE chg {ce:+,.0f}, PE chg {pe:+,.0f})")
+    cwall, pwall = oi_walls(oc, spot)
+    if cwall:
+        print(f"  Call wall   : {cwall[0]:.0f}  (CE OI {cwall[1]:,.0f})  <- OI resistance")
+    if pwall:
+        print(f"  Put wall    : {pwall[0]:.0f}  (PE OI {pwall[1]:,.0f})  <- OI support")
+    if a.chartscript:
+        print(f"  ChartScript inputs -> Call OI change: {ce:.0f}   Put OI change: {pe:.0f}")
 
     for s in find_signals(m15, prices, a.wait)[-3:]:
         live = s["idx"] >= len(m15) - a.live_bars
@@ -259,13 +277,14 @@ def main():
     ap.add_argument("--range-pct", type=float, default=6)
     ap.add_argument("--wait", type=int, default=10, help="max candles to wait for the setup")
     ap.add_argument("--live-bars", type=int, default=2, help="latest N candles count as live for OI gate")
-    ap.add_argument("--watch", type=int, default=0, help="repeat every N seconds")
+    ap.add_argument("--watch", type=int, default=0, help="repeat every N seconds (min 3: option chain rate limit)")
+    ap.add_argument("--chartscript", action="store_true", help="print callChg/putChg to type into the ChartScript inputs")
     a = ap.parse_args()
     while True:
         run(a)
         if not a.watch:
             break
-        time.sleep(a.watch)
+        time.sleep(max(a.watch, 3))
 
 
 if __name__ == "__main__":

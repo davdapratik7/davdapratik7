@@ -56,3 +56,9 @@ def test_oi_bias():
     assert L.oi_bias(oc, 100)[0] == "BULLISH"
     oc = {"100": {"ce": {"oi": 150, "previous_oi": 100}, "pe": {"oi": 90, "previous_oi": 100}}}
     assert L.oi_bias(oc, 100)[0] == "BEARISH"
+
+def test_oi_walls():
+    oc = {"24900": {"ce": {"oi": 10}, "pe": {"oi": 500}}, "24800": {"ce": {"oi": 5}, "pe": {"oi": 900}},
+          "25000": {"ce": {"oi": 700}, "pe": {"oi": 1}}, "25100": {"ce": {"oi": 300}, "pe": {"oi": 1}}}
+    cw, pw = L.oi_walls(oc, 24950)
+    assert cw == (25000.0, 700) and pw == (24800.0, 900)
