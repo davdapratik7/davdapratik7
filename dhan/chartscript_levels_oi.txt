@@ -1,0 +1,125 @@
+//@version=1
+indicator("Level + 50% + OI [Dhan]", overlay=true)
+
+// Dhan ChartScript port of the Level + 50% + OI v2.1 idea.
+// Conservative: no arrays / request.security, so levels are typed in (ascending not required).
+// 0 = level unused. Highest = BULL (green), lowest = BEAR (red).
+
+// ================= INPUTS =================
+l1 = input.float(22185, "Level 1")
+l2 = input.float(24700, "Level 2")
+l3 = input.float(24814, "Level 3")
+l4 = input.float(24985, "Level 4")
+l5 = input.float(0, "Level 5")
+l6 = input.float(0, "Level 6")
+l7 = input.float(0, "Level 7")
+l8 = input.float(0, "Level 8")
+minGap = input.float(100, "Min Gap for 50%")
+waitB  = input.int(10, "Max Bars to Wait")
+reqOI  = input.bool(true, "Enable OI Gate (live bar only)")
+oiBias = input.string("Neutral", "Current OI Bias", options=["Neutral", "Call Writing (Bearish)", "Put Writing (Bullish)"])
+showSig = input.bool(true, "Show CW/PW Signals")
+
+// ================= HELPERS =================
+// nearest level below / above x (na if none)
+lo(l, x) => l > 0 and l < x ? l : -1e12
+hi(l, x) => l > 0 and l > x ? l : 1e12
+
+nearBelow(x) =>
+    m = math.max(math.max(math.max(lo(l1, x), lo(l2, x)), math.max(lo(l3, x), lo(l4, x))), math.max(math.max(lo(l5, x), lo(l6, x)), math.max(lo(l7, x), lo(l8, x))))
+    m < 0 ? na : m
+
+nearAbove(x) =>
+    m = math.min(math.min(math.min(hi(l1, x), hi(l2, x)), math.min(hi(l3, x), hi(l4, x))), math.min(math.min(hi(l5, x), hi(l6, x)), math.min(hi(l7, x), hi(l8, x))))
+    m > 1e11 ? na : m
+
+// ================= LEVELS =================
+top = math.max(math.max(math.max(l1, l2), math.max(l3, l4)), math.max(math.max(l5, l6), math.max(l7, l8)))
+bot = math.min(math.min(math.min(hi(l1, 0), hi(l2, 0)), math.min(hi(l3, 0), hi(l4, 0))), math.min(math.min(hi(l5, 0), hi(l6, 0)), math.min(hi(l7, 0), hi(l8, 0))))
+
+lc(l) => l == top ? color.green : l == bot ? color.red : color.gray
+plot(l1 > 0 ? l1 : na, "L1", color=lc(l1), linewidth=2)
+plot(l2 > 0 ? l2 : na, "L2", color=lc(l2), linewidth=2)
+plot(l3 > 0 ? l3 : na, "L3", color=lc(l3), linewidth=2)
+plot(l4 > 0 ? l4 : na, "L4", color=lc(l4), linewidth=2)
+plot(l5 > 0 ? l5 : na, "L5", color=lc(l5), linewidth=2)
+plot(l6 > 0 ? l6 : na, "L6", color=lc(l6), linewidth=2)
+plot(l7 > 0 ? l7 : na, "L7", color=lc(l7), linewidth=2)
+plot(l8 > 0 ? l8 : na, "L8", color=lc(l8), linewidth=2)
+
+// ================= 50% LINES =================
+nr = nearAbove(close)
+ns = nearBelow(close)
+dynMid = not na(nr) and not na(ns) and (nr - ns) >= minGap ? (nr + ns) / 2 : na
+gMid = top > 0 and bot < 1e11 ? (top + bot) / 2 : na
+plot(dynMid, "Dynamic 50%", color=color.orange, linewidth=2)
+plot(gMid, "Global 50%", color=color.blue, linewidth=1)
+
+// ================= SIGNALS (state machine) =================
+supLv = nearBelow(close[1])
+resLv = nearAbove(close[1])
+brkSup = not na(supLv) and close < supLv
+brkRes = not na(resLv) and close > resLv
+
+var int bState = 0
+var int bStart = 0
+var float bLvl = na
+var float bGLow = na
+var int uState = 0
+var int uStart = 0
+var float uLvl = na
+var float uRHigh = na
+bFire = false
+uFire = false
+
+if brkSup
+    bState := 1
+    bStart := bar_index
+    bLvl := supLv
+    bGLow := na
+if bState == 1 and bar_index > bStart
+    if close > bLvl
+        bState := 0
+    else if close > open
+        bState := 2
+        bGLow := low
+    else if bar_index - bStart > waitB
+        bState := 0
+if bState == 2
+    if low < bGLow
+        bFire := true
+        bState := 0
+    else if close > bLvl or bar_index - bStart > waitB * 2
+        bState := 0
+
+if brkRes
+    uState := 1
+    uStart := bar_index
+    uLvl := resLv
+    uRHigh := na
+if uState == 1 and bar_index > uStart
+    if close < uLvl
+        uState := 0
+    else if close < open
+        uState := 2
+        uRHigh := high
+    else if bar_index - uStart > waitB
+        uState := 0
+if uState == 2
+    if high > uRHigh
+        uFire := true
+        uState := 0
+    else if close < uLvl or bar_index - uStart > waitB * 2
+        uState := 0
+
+// OI gate: live bars only (history = unconfirmed grey)
+oiOkB = not reqOI or (barstate.isrealtime and oiBias == "Call Writing (Bearish)")
+oiOkU = not reqOI or (barstate.isrealtime and oiBias == "Put Writing (Bullish)")
+
+plotshape(showSig and bFire and oiOkB, "CW", shape.triangledown, location.abovebar, color.red, size=size.small, text="CW")
+plotshape(showSig and bFire and not oiOkB, "CW?", shape.triangledown, location.abovebar, color.gray, size=size.tiny, text="cw?")
+plotshape(showSig and uFire and oiOkU, "PW", shape.triangleup, location.belowbar, color.green, size=size.small, text="PW")
+plotshape(showSig and uFire and not oiOkU, "PW?", shape.triangleup, location.belowbar, color.gray, size=size.tiny, text="pw?")
+
+alertcondition(showSig and bFire and oiOkB, "CALL WRITER Entry", "CW setup + OI confirmed")
+alertcondition(showSig and uFire and oiOkU, "PUT WRITER Entry", "PW setup + OI confirmed")
