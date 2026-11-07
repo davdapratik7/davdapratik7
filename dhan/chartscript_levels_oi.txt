@@ -15,6 +15,8 @@ l6 = input.float(0, "Level 6")
 l7 = input.float(0, "Level 7")
 l8 = input.float(0, "Level 8")
 minGap = input.float(100, "Min Gap for 50%")
+maxGap = input.float(600, "Max Gap for Dynamic 50% (hides huge zones)")
+showGlobal = input.bool(false, "Show Global 50% (top/bottom)")
 waitB  = input.int(10, "Max Bars to Wait")
 reqOI  = input.bool(true, "Enable OI Gate (live bar only)")
 oiBias = input.string("Neutral", "Current OI Bias", options=["Neutral", "Call Writing (Bearish)", "Put Writing (Bullish)"])
@@ -50,10 +52,10 @@ plot(l8 > 0 ? l8 : na, "L8", color=lc(l8), linewidth=2)
 // ================= 50% LINES =================
 nr = nearAbove(close)
 ns = nearBelow(close)
-dynMid = not na(nr) and not na(ns) and (nr - ns) >= minGap ? (nr + ns) / 2 : na
+dynMid = not na(nr) and not na(ns) and (nr - ns) >= minGap and (nr - ns) <= maxGap ? (nr + ns) / 2 : na
 gMid = top > 0 and bot < 1e11 ? (top + bot) / 2 : na
 plot(dynMid, "Dynamic 50%", color=color.orange, linewidth=2)
-plot(gMid, "Global 50%", color=color.blue, linewidth=1)
+plot(showGlobal ? gMid : na, "Global 50%", color=color.blue, linewidth=1)
 
 // ================= SIGNALS (state machine) =================
 supLv = nearBelow(close[1])
