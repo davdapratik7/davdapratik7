@@ -1,25 +1,30 @@
 #!/usr/bin/env python3
-"""Levels + 50% midpoint + OI-confirmed level-to-level plan, using the DhanHQ v2 API.
+"""Level + 50% + OI planner (v2.1 logic) on the DhanHQ v2 API.
 
-Same framework as tradingview/levels_50pct_oi.pine, but OI bias is read
-automatically from Dhan's option chain.
+Port of the TradingView "Level + 50% + OI v2.1" indicator. OI bias is read
+automatically from Dhan's option chain instead of a manual toggle.
+
+Levels : manual (kept EXACT) + daily swings + 15m swings, merged within --merge-tol
+50% lines: global (top/bottom), dynamic (nearest pair with gap >= --min-gap), pain zone
+Signals: breakdown/breakout -> opposite candle -> its low/high broken (15m candles)
+         T1/T2 = next levels. OI gate applies to live candles only (history = "n/a").
 
 Setup:  pip install requests
         export DHAN_CLIENT_ID=...  DHAN_ACCESS_TOKEN=...
 Run:    python levels_oi.py --symbol NIFTY --levels 22185,24985
         python levels_oi.py --symbol SENSEX --watch 60
-Not financial advice. Verify against your own charts before trading.
+Informational only; it places no orders. Not financial advice.
 """
 import argparse, os, sys, time, datetime as dt
 
-# IDX_I security ids on Dhan: NIFTY=13, BANKNIFTY=25, SENSEX=51
-INDEX = {"NIFTY": 13, "BANKNIFTY": 25, "SENSEX": 51}
+INDEX = {"NIFTY": 13, "BANKNIFTY": 25, "SENSEX": 51}   # IDX_I security ids
 BASE = "https://api.dhan.co/v2"
+IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
 
 
 # ---------------- pure logic (no network) ----------------
 def swing_levels(highs, lows, n):
-    """Pivot highs/lows: bar is the extreme of n bars on each side."""
+    """Pivot highs/lows: the bar is the extreme of n bars on each side."""
     out = []
     for i in range(n, len(highs) - n):
         if highs[i] == max(highs[i - n:i + n + 1]):
@@ -29,16 +34,25 @@ def swing_levels(highs, lows, n):
     return out
 
 
-def merge_levels(levels, tol=0.0):
-    out = []
-    for v in sorted(set(round(x, 2) for x in levels)):
-        if not out or v - out[-1] > tol:
-            out.append(v)
-    return out
-
-
-def midpoints(levels, min_gap):
-    return [((a + b) / 2, a, b) for a, b in zip(levels, levels[1:]) if b - a >= min_gap]
+def build_levels(manual, auto_by_src, tol):
+    """Manual levels stay exact. Auto levels within tol of a manual level are dropped;
+    the rest are clustered (averaged) within tol. Returns sorted [(price, src)]."""
+    man = sorted(set(manual))
+    items = sorted((v, s) for s, vs in auto_by_src.items() for v in vs
+                   if all(abs(v - m) > tol for m in man))
+    out = [(m, "M") for m in man]
+    cur = cnt = tag = None
+    for v, s in items:
+        if cur is not None and v - cur <= tol:
+            cur = (cur * cnt + v) / (cnt + 1)
+            cnt += 1
+        else:
+            if cur is not None:
+                out.append((round(cur, 2), tag))
+            cur, cnt, tag = v, 1, s
+    if cur is not None:
+        out.append((round(cur, 2), tag))
+    return sorted(out)
 
 
 def below(levels, x):
@@ -51,55 +65,94 @@ def above(levels, x):
     return min(c) if c else None
 
 
-def find_signals(candles, levels):
-    """candles: list of dicts o,h,l,c,t. Mirrors the Pine state machine.
-    Short: close below level -> green candle forms -> its low breaks.
-    Long : close above level -> red candle forms -> its high breaks."""
+def dynamic_mid(levels, spot, min_gap):
+    """50% of the nearest pair around spot whose gap >= min_gap (widens outward)."""
+    lo_c = sorted((v for v in levels if v < spot), reverse=True)
+    hi_c = sorted(v for v in levels if v > spot)
+    if not lo_c or not hi_c:
+        return None
+    i = j = 0
+    while hi_c[j] - lo_c[i] < min_gap:
+        can_lo, can_hi = i + 1 < len(lo_c), j + 1 < len(hi_c)
+        if can_lo and (not can_hi or spot - lo_c[i + 1] <= hi_c[j + 1] - spot):
+            i += 1
+        elif can_hi:
+            j += 1
+        else:
+            return None
+    return (lo_c[i] + hi_c[j]) / 2, lo_c[i], hi_c[j]
+
+
+def pain_zone(levels, spot, frac=0.02):
+    for a, b in zip(levels, levels[1:]):
+        d = b - a
+        if d > 0 and abs(spot - (a + b) / 2) <= d * frac:
+            return True
+    return False
+
+
+def find_signals(candles, levels, wait=10):
+    """State machine (candles: dicts o,h,l,c,t).
+    SELL: close below a level -> green candle -> a later low breaks that green low.
+    BUY : close above a level -> red candle   -> a later high breaks that red high.
+    Either setup is cancelled by price closing back through the level or by timeout."""
     sigs = []
-    short = long_ = False
-    brk_s = brk_l = green_low = red_high = None
+    bs = us = 0                     # state: 0 idle, 1 wait candle, 2 wait break
+    b_start = u_start = 0
+    b_lvl = u_lvl = g_low = r_high = None
     for i in range(1, len(candles)):
         p, k = candles[i - 1], candles[i]
-        for L in levels:
-            if p["c"] >= L > k["c"]:
-                short, long_, brk_s, green_low = True, False, L, None
-            if p["c"] <= L < k["c"]:
-                long_, short, brk_l, red_high = True, False, L, None
-        if short:
-            if k["c"] > brk_s:
-                short = False
-            elif green_low is not None and k["c"] < green_low:
-                t1 = below(levels, brk_s)
-                t2 = below(levels, t1) if t1 else None
-                sigs.append(("SELL", k["t"], k["c"], brk_s, t1, t2))
-                short = False
+        sup, res = below(levels, p["c"]), above(levels, p["c"])
+        if sup is not None and k["c"] < sup:
+            bs, b_start, b_lvl, g_low = 1, i, sup, None
+        if res is not None and k["c"] > res:
+            us, u_start, u_lvl, r_high = 1, i, res, None
+
+        if bs == 1 and i > b_start:
+            if k["c"] > b_lvl:
+                bs = 0
             elif k["c"] > k["o"]:
-                green_low = k["l"]
-        if long_:
-            if k["c"] < brk_l:
-                long_ = False
-            elif red_high is not None and k["c"] > red_high:
-                t1 = above(levels, brk_l)
-                t2 = above(levels, t1) if t1 else None
-                sigs.append(("BUY", k["t"], k["c"], brk_l, t1, t2))
-                long_ = False
+                bs, g_low = 2, k["l"]
+            elif i - b_start > wait:
+                bs = 0
+        if bs == 2:
+            if k["l"] < g_low:
+                t1 = below(levels, b_lvl)
+                sigs.append({"side": "SELL", "idx": i, "t": k["t"], "px": k["c"], "level": b_lvl,
+                             "t1": t1, "t2": below(levels, t1) if t1 is not None else None})
+                bs = 0
+            elif k["c"] > b_lvl or i - b_start > wait * 2:
+                bs = 0
+
+        if us == 1 and i > u_start:
+            if k["c"] < u_lvl:
+                us = 0
             elif k["c"] < k["o"]:
-                red_high = k["h"]
+                us, r_high = 2, k["h"]
+            elif i - u_start > wait:
+                us = 0
+        if us == 2:
+            if k["h"] > r_high:
+                t1 = above(levels, u_lvl)
+                sigs.append({"side": "BUY", "idx": i, "t": k["t"], "px": k["c"], "level": u_lvl,
+                             "t1": t1, "t2": above(levels, t1) if t1 is not None else None})
+                us = 0
+            elif k["c"] < u_lvl or i - u_start > wait * 2:
+                us = 0
     return sigs
 
 
 def oi_bias(oc, spot, strikes_each_side=5):
-    """oc: Dhan option-chain 'oc' dict {strike: {ce:{oi,previous_oi}, pe:{...}}}.
-    Sums OI change over strikes around spot."""
+    """oc = Dhan option-chain 'oc' dict {strike: {ce:{oi,previous_oi}, pe:{...}}}."""
     strikes = sorted(oc, key=float)
     atm = min(range(len(strikes)), key=lambda i: abs(float(strikes[i]) - spot))
     near = strikes[max(0, atm - strikes_each_side): atm + strikes_each_side + 1]
-    ce = sum(oc[s].get("ce", {}).get("oi", 0) - oc[s].get("ce", {}).get("previous_oi", 0) for s in near)
-    pe = sum(oc[s].get("pe", {}).get("oi", 0) - oc[s].get("pe", {}).get("previous_oi", 0) for s in near)
+    chg = lambda s, side: oc[s].get(side, {}).get("oi", 0) - oc[s].get(side, {}).get("previous_oi", 0)
+    ce, pe = sum(chg(s, "ce") for s in near), sum(chg(s, "pe") for s in near)
     if pe > 0 and ce <= 0:
-        bias = "BULLISH"   # put writers adding, call writers exiting
+        bias = "BULLISH"        # put writers adding, call writers exiting
     elif ce > 0 and pe <= 0:
-        bias = "BEARISH"   # call writers adding, put writers exiting
+        bias = "BEARISH"        # call writers adding, put writers exiting
     elif pe > ce:
         bias = "LEAN BULLISH"
     elif ce > pe:
@@ -128,18 +181,17 @@ def _to_candles(d):
 
 def fetch_daily(sec_id, days=400):
     to = dt.date.today()
-    d = _post("/charts/historical", {"securityId": str(sec_id), "exchangeSegment": "IDX_I",
-              "instrument": "INDEX", "expCode": 0, "oi": False,
-              "fromDate": str(to - dt.timedelta(days=days)), "toDate": str(to)})
-    return _to_candles(d)
+    return _to_candles(_post("/charts/historical", {
+        "securityId": str(sec_id), "exchangeSegment": "IDX_I", "instrument": "INDEX",
+        "expCode": 0, "oi": False,
+        "fromDate": str(to - dt.timedelta(days=days)), "toDate": str(to)}))
 
 
-def fetch_15m(sec_id, days=5):
+def fetch_15m(sec_id, days=10):
     to = dt.date.today() + dt.timedelta(days=1)
-    d = _post("/charts/intraday", {"securityId": str(sec_id), "exchangeSegment": "IDX_I",
-              "instrument": "INDEX", "interval": "15",
-              "fromDate": str(to - dt.timedelta(days=days)), "toDate": str(to)})
-    return _to_candles(d)
+    return _to_candles(_post("/charts/intraday", {
+        "securityId": str(sec_id), "exchangeSegment": "IDX_I", "instrument": "INDEX",
+        "interval": "15", "fromDate": str(to - dt.timedelta(days=days)), "toDate": str(to)}))
 
 
 def fetch_option_chain(sec_id):
@@ -149,38 +201,64 @@ def fetch_option_chain(sec_id):
 
 
 # ---------------- report ----------------
-def run(args):
-    sec = INDEX[args.symbol]
-    daily = fetch_daily(sec)
-    levels = [float(x) for x in args.levels.split(",") if x.strip()]
-    if not args.no_auto:
-        levels += swing_levels([c["h"] for c in daily], [c["l"] for c in daily], args.swing)
+def fmt_t(t):
+    try:
+        return dt.datetime.fromtimestamp(t, IST).strftime("%d-%b %H:%M")
+    except Exception:
+        return str(t)
+
+
+def run(a):
+    sec = INDEX[a.symbol]
+    manual = [float(x) for x in a.levels.split(",") if x.strip()]
+    auto = {}
+    if not a.no_auto:
+        daily = fetch_daily(sec)
+        auto["D"] = swing_levels([c["h"] for c in daily], [c["l"] for c in daily], a.dpiv)[-a.max_daily:]
+    m15 = fetch_15m(sec)
+    if not a.no_auto:
+        auto["15"] = swing_levels([c["h"] for c in m15], [c["l"] for c in m15], a.p15)[-20:]
     spot, oc, exp = fetch_option_chain(sec)
-    levels = [v for v in merge_levels(levels) if abs(v - spot) / spot * 100 <= args.range_pct]
     bias, ce, pe = oi_bias(oc, spot)
 
-    print(f"\n{args.symbol}  spot {spot:.2f}  expiry {exp}")
-    mids = {round(m, 2): (a, b) for m, a, b in midpoints(levels, args.min_gap)}
-    top, bot = (levels[-1], levels[0]) if levels else (None, None)
-    for v in sorted(set(levels) | set(mids), reverse=True):
-        tag = "50%" if v in mids else ("BULL (green)" if v == top else "BEAR (red)" if v == bot else "level")
-        print(f"  {v:>10.2f}  {tag}{'   <-- spot nearby' if abs(v - spot) < 30 else ''}")
-    print(f"OI bias: {bias}  (CE chg {ce:+,.0f}, PE chg {pe:+,.0f})")
+    lv = [(p, s) for p, s in build_levels(manual, auto, a.merge_tol)
+          if abs(p - spot) / spot * 100 <= a.range_pct]
+    prices = [p for p, _ in lv]
+    print(f"\n{a.symbol}  spot {spot:.2f}  expiry {exp}")
+    if not prices:
+        print("  no levels in range")
+        return
+    top, bot = prices[-1], prices[0]
+    for p, s in sorted(lv, reverse=True):
+        tag = "BULL zone" if p == top else "BEAR zone" if p == bot else s
+        print(f"  {p:>10.2f}  {tag:<10}{'  <-- spot' if abs(p - spot) < 30 else ''}")
+    print(f"  Global 50%  : {(top + bot) / 2:.2f}")
+    dm = dynamic_mid(prices, spot, a.min_gap)
+    print(f"  Dynamic 50% : {dm[0]:.2f}  (between {dm[1]:.2f} and {dm[2]:.2f})" if dm else "  Dynamic 50% : n/a")
+    print(f"  Pain zone   : {'ACTIVE' if pain_zone(prices, spot) else '-'}")
+    print(f"  OI bias     : {bias}  (CE chg {ce:+,.0f}, PE chg {pe:+,.0f})")
 
-    for s in find_signals(fetch_15m(sec), levels)[-3:]:
-        side, t, px, brk, t1, t2 = s
-        ok = (side == "BUY" and "BULL" in bias) or (side == "SELL" and "BEAR" in bias)
-        print(f"  15m {side} @ {px:.2f} (level {brk:.2f}) T1 {t1} T2 {t2}  OI {'OK' if ok else 'NOT confirmed'}  t={t}")
+    for s in find_signals(m15, prices, a.wait)[-3:]:
+        live = s["idx"] >= len(m15) - a.live_bars
+        want = "BULL" if s["side"] == "BUY" else "BEAR"
+        gate = ("OI OK" if want in bias else "OI NOT confirmed") if live else "history (OI n/a)"
+        print(f"  15m {s['side']:<4} @ {s['px']:.2f} lvl {s['level']:.2f}  "
+              f"T1 {s['t1']} T2 {s['t2']}  [{gate}]  {fmt_t(s['t'])}")
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--symbol", choices=INDEX, default="NIFTY")
-    ap.add_argument("--levels", default="", help="manual levels, comma separated")
-    ap.add_argument("--no-auto", action="store_true", help="skip auto daily swing levels")
-    ap.add_argument("--swing", type=int, default=10)
+    ap.add_argument("--levels", default="", help="manual levels, comma separated (kept exact)")
+    ap.add_argument("--no-auto", action="store_true", help="manual levels only")
+    ap.add_argument("--dpiv", type=int, default=5, help="daily swing length")
+    ap.add_argument("--p15", type=int, default=5, help="15m swing length")
+    ap.add_argument("--max-daily", type=int, default=20)
+    ap.add_argument("--merge-tol", type=float, default=15)
     ap.add_argument("--min-gap", type=float, default=100)
     ap.add_argument("--range-pct", type=float, default=6)
+    ap.add_argument("--wait", type=int, default=10, help="max candles to wait for the setup")
+    ap.add_argument("--live-bars", type=int, default=2, help="latest N candles count as live for OI gate")
     ap.add_argument("--watch", type=int, default=0, help="repeat every N seconds")
     a = ap.parse_args()
     while True:
